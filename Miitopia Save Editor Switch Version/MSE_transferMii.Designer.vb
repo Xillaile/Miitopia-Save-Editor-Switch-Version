@@ -40,6 +40,8 @@ Partial Class MSE_transferMii
         Me.Iconwar_partylevel = New System.Windows.Forms.PictureBox()
         Me.Label1 = New System.Windows.Forms.Label()
         Me.PictureBox1 = New System.Windows.Forms.PictureBox()
+        Me.Button_exportall = New System.Windows.Forms.Button()
+        Me.Button_importall = New System.Windows.Forms.Button()
         CType(Me.Icon_menu, System.ComponentModel.ISupportInitialize).BeginInit()
         Me.MSE_header.SuspendLayout()
         CType(Me.MSE_title, System.ComponentModel.ISupportInitialize).BeginInit()
@@ -240,12 +242,34 @@ Partial Class MSE_transferMii
         Me.PictureBox1.TabIndex = 49
         Me.PictureBox1.TabStop = False
         '
+        'Button_exportall
+        '
+        Me.Button_exportall.Cursor = System.Windows.Forms.Cursors.Hand
+        Me.Button_exportall.Location = New System.Drawing.Point(262, 295)
+        Me.Button_exportall.Name = "Button_exportall"
+        Me.Button_exportall.Size = New System.Drawing.Size(181, 28)
+        Me.Button_exportall.TabIndex = 50
+        Me.Button_exportall.Text = "Export ALL Miis (folder)"
+        Me.Button_exportall.UseVisualStyleBackColor = True
+        '
+        'Button_importall
+        '
+        Me.Button_importall.Cursor = System.Windows.Forms.Cursors.Hand
+        Me.Button_importall.Location = New System.Drawing.Point(480, 295)
+        Me.Button_importall.Name = "Button_importall"
+        Me.Button_importall.Size = New System.Drawing.Size(181, 28)
+        Me.Button_importall.TabIndex = 51
+        Me.Button_importall.Text = "Import ALL Miis (folder)"
+        Me.Button_importall.UseVisualStyleBackColor = True
+        '
         'MSE_transferMii
         '
         Me.AutoScaleDimensions = New System.Drawing.SizeF(6.0!, 13.0!)
         Me.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font
         Me.BackgroundImage = Global.Miitopia_Save_Editor_Switch_Version.My.Resources.Resources.bg_transfermii
         Me.ClientSize = New System.Drawing.Size(830, 361)
+        Me.Controls.Add(Me.Button_importall)
+        Me.Controls.Add(Me.Button_exportall)
         Me.Controls.Add(Me.Label1)
         Me.Controls.Add(Me.Iconwar_partylevel)
         Me.Controls.Add(Me.Text_Miiname)
@@ -297,4 +321,6 @@ Partial Class MSE_transferMii
     Friend WithEvents Iconwar_partylevel As PictureBox
     Friend WithEvents Label1 As Label
     Friend WithEvents PictureBox1 As PictureBox
+    Friend WithEvents Button_exportall As Button
+    Friend WithEvents Button_importall As Button
 End Class

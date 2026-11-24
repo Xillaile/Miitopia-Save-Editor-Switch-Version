@@ -1,6 +1,7 @@
 ﻿Imports System
 Imports PackageIO
 Imports System.IO
+Imports System.Collections.Generic
 Public Class MSE_transferMii
     Private IsFormBeingDragged As Boolean = False
     Private MousedwnX As Integer
@@ -6170,6 +6171,161 @@ Public Class MSE_transferMii
     End Sub
 
     Private Sub Icon_import_MouseLeave(sender As Object, e As EventArgs) Handles Icon_import.MouseLeave
+        Panel_description.Visible = False
+    End Sub
+
+    'bulk transfer : export / import ALL Mii appearances at once
+    'Same layout as the single Mii transfer above : slot N (1-500) is at
+    '  name       = &H2FE8 + (N-1) * &H800   (10 unicode chars)
+    '  appearance = &H3000 + (N-1) * &H800   (&H7C8 bytes)
+    'Files are written as "001_Name.MiitopiaMiA" and are 100% compatible with the single import/extract.
+    Private Const BULK_MII_COUNT As Integer = 500
+    Private Const BULK_SLOT_SIZE As Integer = &H800
+    Private Const BULK_NAME_FIRST As Integer = &H2FE8
+    Private Const BULK_APPEARANCE_FIRST As Integer = &H3000
+    Private Const BULK_APPEARANCE_SIZE As Integer = &H7C8
+
+    Private Function BulkReadBlock(fs As FileStream, position As Long, size As Integer) As Byte()
+        Dim buffer(size - 1) As Byte
+        fs.Position = position
+        Dim total As Integer = 0
+        While total < size
+            Dim n As Integer = fs.Read(buffer, total, size - total)
+            If n <= 0 Then Throw New EndOfStreamException()
+            total += n
+        End While
+        Return buffer
+    End Function
+
+    Private Function BulkIsAllZero(data As Byte()) As Boolean
+        For Each b As Byte In data
+            If b <> 0 Then Return False
+        Next
+        Return True
+    End Function
+
+    Private Function BulkSafeFileName(text As String) As String
+        Dim result As String = text
+        For Each c As Char In Path.GetInvalidFileNameChars()
+            result = result.Replace(c, "_"c)
+        Next
+        Return result.Trim()
+    End Function
+
+    Private Sub Button_exportall_Click(sender As Object, e As EventArgs) Handles Button_exportall.Click
+        If String.IsNullOrEmpty(CStr(mainsav)) Then
+            MSE_dialog.text_dialog.Text = "Open a Miitopia save file before exporting"
+            MSE_dialog.ShowDialog()
+            Return
+        End If
+
+        Dim folderDialog As New FolderBrowserDialog
+        folderDialog.Description = "Choose a folder : every Mii appearance will be exported as a separate .MiitopiaMiA file"
+        If folderDialog.ShowDialog() <> Windows.Forms.DialogResult.OK Then Return
+
+        Try
+            Dim exported As Integer = 0
+            Using fs As New FileStream(CStr(mainsav), FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
+                For i As Integer = 0 To BULK_MII_COUNT - 1
+                    Dim nameBytes As Byte() = BulkReadBlock(fs, BULK_NAME_FIRST + CLng(i) * BULK_SLOT_SIZE, 20)
+                    Dim appearance As Byte() = BulkReadBlock(fs, BULK_APPEARANCE_FIRST + CLng(i) * BULK_SLOT_SIZE, BULK_APPEARANCE_SIZE)
+
+                    'unused slot : no name and no appearance data
+                    If BulkIsAllZero(nameBytes) AndAlso BulkIsAllZero(appearance) Then Continue For
+
+                    Dim miiName As String = System.Text.Encoding.Unicode.GetString(nameBytes)
+                    Dim endOfName As Integer = miiName.IndexOf(ChrW(0))
+                    If endOfName >= 0 Then miiName = miiName.Substring(0, endOfName)
+                    miiName = BulkSafeFileName(miiName)
+
+                    Dim fileName As String = (i + 1).ToString("000") & "_" & miiName & ".MiitopiaMiA"
+                    File.WriteAllBytes(Path.Combine(folderDialog.SelectedPath, fileName), appearance)
+                    exported += 1
+                Next
+            End Using
+            MSE_dialog.text_dialog.Text = exported & " Mii appearances have been successfully exported"
+            MSE_dialog.ShowDialog()
+        Catch ex As Exception
+            MSE_dialog.text_dialog.Text = "Failed to export all Mii appearances" & vbNewLine & "Report this issue or retry"
+            MSE_dialog.ShowDialog()
+        End Try
+    End Sub
+
+    Private Sub Button_exportall_MouseMove(sender As Object, e As MouseEventArgs) Handles Button_exportall.MouseMove
+        Text_description.Text = "Click to export ALL Mii appearances in a folder (one file per Mii)"
+        Panel_description.Visible = True
+    End Sub
+
+    Private Sub Button_exportall_MouseLeave(sender As Object, e As EventArgs) Handles Button_exportall.MouseLeave
+        Panel_description.Visible = False
+    End Sub
+
+    Private Sub Button_importall_Click(sender As Object, e As EventArgs) Handles Button_importall.Click
+        If String.IsNullOrEmpty(CStr(mainsav)) Then
+            MSE_dialog.text_dialog.Text = "Open a Miitopia save file before importing"
+            MSE_dialog.ShowDialog()
+            Return
+        End If
+
+        MSE_dialog.text_dialog.Text = "Choose a folder containing .MiitopiaMiA files named like 001_Name.MiitopiaMiA" & vbNewLine & "The number at the start of the file name is the Mii slot (1-500) that will be REPLACED" & vbNewLine & vbNewLine & "Do you want to continue ?"
+        MSE_dialog.MSE_dialog_panelbuttons.Visible = True
+        MSE_dialog.ShowDialog()
+        If MSE_dialog.DialogResult <> Windows.Forms.DialogResult.OK Then Return
+
+        Dim folderDialog As New FolderBrowserDialog
+        folderDialog.Description = "Choose the folder containing the .MiitopiaMiA files to import"
+        If folderDialog.ShowDialog() <> Windows.Forms.DialogResult.OK Then Return
+
+        Try
+            'read and check every file first, so the save is not touched if nothing is valid
+            Dim toWrite As New SortedDictionary(Of Integer, Byte())
+            Dim skipped As Integer = 0
+            For Each filePath As String In Directory.GetFiles(folderDialog.SelectedPath, "*.MiitopiaMiA")
+                Dim m As System.Text.RegularExpressions.Match = System.Text.RegularExpressions.Regex.Match(Path.GetFileName(filePath), "^(\d{1,3})")
+                Dim slot As Integer = 0
+                If Not m.Success OrElse Not Integer.TryParse(m.Groups(1).Value, slot) OrElse slot < 1 OrElse slot > BULK_MII_COUNT Then
+                    skipped += 1
+                    Continue For
+                End If
+                Dim data As Byte() = File.ReadAllBytes(filePath)
+                If data.Length <> BULK_APPEARANCE_SIZE Then
+                    skipped += 1
+                    Continue For
+                End If
+                toWrite(slot) = data
+            Next
+
+            If toWrite.Count = 0 Then
+                MSE_dialog.text_dialog.Text = "No valid Mii appearance file found in this folder" & vbNewLine & "File names must start with the slot number (ex: 001_Name.MiitopiaMiA)"
+                MSE_dialog.ShowDialog()
+                Return
+            End If
+
+            Using fs As New FileStream(CStr(mainsav), FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite)
+                For Each entry As KeyValuePair(Of Integer, Byte()) In toWrite
+                    fs.Position = BULK_APPEARANCE_FIRST + CLng(entry.Key - 1) * BULK_SLOT_SIZE
+                    fs.Write(entry.Value, 0, entry.Value.Length)
+                Next
+            End Using
+
+            Dim message As String = toWrite.Count & " Mii appearances have been successfully imported"
+            If skipped > 0 Then message &= vbNewLine & skipped & " file(s) were ignored (bad name or bad size)"
+            MSE_dialog.text_dialog.Text = message & vbNewLine & "You will be back to menu"
+            MSE_dialog.ShowDialog()
+            MSE_hub.Show()
+            Me.Close()
+        Catch ex As Exception
+            MSE_dialog.text_dialog.Text = "Failed to import all Mii appearances" & vbNewLine & "Make sure you have opened a Miitopia save file before or report this issue"
+            MSE_dialog.ShowDialog()
+        End Try
+    End Sub
+
+    Private Sub Button_importall_MouseMove(sender As Object, e As MouseEventArgs) Handles Button_importall.MouseMove
+        Text_description.Text = "Click to import ALL Mii appearances from a folder (slot = number at start of file name)"
+        Panel_description.Visible = True
+    End Sub
+
+    Private Sub Button_importall_MouseLeave(sender As Object, e As EventArgs) Handles Button_importall.MouseLeave
         Panel_description.Visible = False
     End Sub
 End Class
