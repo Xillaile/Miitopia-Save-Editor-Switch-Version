@@ -6174,16 +6174,26 @@ Public Class MSE_transferMii
         Panel_description.Visible = False
     End Sub
 
-    'bulk transfer : export / import ALL Mii appearances at once
-    'Same layout as the single Mii transfer above : slot N (1-500) is at
-    '  name       = &H2FE8 + (N-1) * &H800   (10 unicode chars)
-    '  appearance = &H3000 + (N-1) * &H800   (&H7C8 bytes)
-    'Files are written as "001_Name.MiitopiaMiA" and are 100% compatible with the single import/extract.
-    Private Const BULK_MII_COUNT As Integer = 500
+    'bulk transfer : export / import ALL Miis at once
+    'A whole Mii slot is copied : id + name + appearance (&H800 bytes), so names are transferred too.
+    'Mii table layout in main.sav (found by comparing a 3 Mii save with a 403 Mii save) :
+    '  &H2FA8  "Mb" section header
+    '  &H2FBC  Int32 = number of Miis in the save (the game ignores every slot after this number)
+    '  &H2FC4  Int32 = Mii counter, kept >= number of Miis + 1
+    '  &H2FC8  500 slots of &H800 bytes = [&H20 header with Mii id][&H18 name][&H7C8 appearance]
+    'Files are written as "001_Name.MiitopiaMii" (one full slot each).
+    Private Const BULK_MII_MAX As Integer = 500
     Private Const BULK_SLOT_SIZE As Integer = &H800
-    Private Const BULK_NAME_FIRST As Integer = &H2FE8
-    Private Const BULK_APPEARANCE_FIRST As Integer = &H3000
-    Private Const BULK_APPEARANCE_SIZE As Integer = &H7C8
+    Private Const BULK_SLOT_FIRST As Integer = &H2FC8
+    Private Const BULK_SECTION_OFFSET As Integer = &H2FA8
+    Private Const BULK_COUNT_OFFSET As Integer = &H2FBC
+    Private Const BULK_NEXTID_OFFSET As Integer = &H2FC4
+    Private Const BULK_EXT As String = ".MiitopiaMii"
+
+    'position of a Mii slot, slot is 1 to 500
+    Private Function BulkSlotPos(slot As Integer) As Long
+        Return BULK_SLOT_FIRST + CLng(slot - 1) * BULK_SLOT_SIZE
+    End Function
 
     Private Function BulkReadBlock(fs As FileStream, position As Long, size As Integer) As Byte()
         Dim buffer(size - 1) As Byte
@@ -6197,11 +6207,23 @@ Public Class MSE_transferMii
         Return buffer
     End Function
 
-    Private Function BulkIsAllZero(data As Byte()) As Boolean
-        For Each b As Byte In data
-            If b <> 0 Then Return False
-        Next
-        Return True
+    Private Function BulkReadInt32(fs As FileStream, position As Long) As Integer
+        Return BitConverter.ToInt32(BulkReadBlock(fs, position, 4), 0)
+    End Function
+
+    Private Sub BulkWriteInt32(fs As FileStream, position As Long, value As Integer)
+        Dim bytes As Byte() = BitConverter.GetBytes(value)
+        fs.Position = position
+        fs.Write(bytes, 0, 4)
+    End Sub
+
+    'true if the file looks like a Miitopia main.sav with a readable Mii table
+    Private Function BulkIsValidSave(fs As FileStream) As Boolean
+        If fs.Length < BULK_SLOT_FIRST + CLng(BULK_MII_MAX) * BULK_SLOT_SIZE Then Return False
+        Dim magic As Byte() = BulkReadBlock(fs, BULK_SECTION_OFFSET, 2)
+        If magic(0) <> &H4D OrElse magic(1) <> &H62 Then Return False
+        Dim count As Integer = BulkReadInt32(fs, BULK_COUNT_OFFSET)
+        Return count >= 0 AndAlso count <= BULK_MII_MAX
     End Function
 
     Private Function BulkSafeFileName(text As String) As String
@@ -6212,47 +6234,51 @@ Public Class MSE_transferMii
         Return result.Trim()
     End Function
 
+    Private Sub BulkShowMessage(text As String)
+        MSE_dialog.text_dialog.Text = text
+        MSE_dialog.ShowDialog()
+    End Sub
+
     Private Sub Button_exportall_Click(sender As Object, e As EventArgs) Handles Button_exportall.Click
         If String.IsNullOrEmpty(CStr(mainsav)) Then
-            MSE_dialog.text_dialog.Text = "Open a Miitopia save file before exporting"
-            MSE_dialog.ShowDialog()
+            BulkShowMessage("Open a Miitopia save file before exporting")
             Return
         End If
 
         Dim folderDialog As New FolderBrowserDialog
-        folderDialog.Description = "Choose a folder : every Mii appearance will be exported as a separate .MiitopiaMiA file"
+        folderDialog.Description = "Choose a folder : every Mii will be exported as a separate .MiitopiaMii file"
         If folderDialog.ShowDialog() <> Windows.Forms.DialogResult.OK Then Return
 
         Try
             Dim exported As Integer = 0
             Using fs As New FileStream(CStr(mainsav), FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
-                For i As Integer = 0 To BULK_MII_COUNT - 1
-                    Dim nameBytes As Byte() = BulkReadBlock(fs, BULK_NAME_FIRST + CLng(i) * BULK_SLOT_SIZE, 20)
-                    Dim appearance As Byte() = BulkReadBlock(fs, BULK_APPEARANCE_FIRST + CLng(i) * BULK_SLOT_SIZE, BULK_APPEARANCE_SIZE)
+                If Not BulkIsValidSave(fs) Then
+                    BulkShowMessage("This file does not look like a Miitopia main.sav" & vbNewLine & "Nothing has been exported")
+                    Return
+                End If
+                Dim count As Integer = BulkReadInt32(fs, BULK_COUNT_OFFSET)
+                For i As Integer = 1 To count
+                    Dim slotData As Byte() = BulkReadBlock(fs, BulkSlotPos(i), BULK_SLOT_SIZE)
 
-                    'unused slot : no name and no appearance data
-                    If BulkIsAllZero(nameBytes) AndAlso BulkIsAllZero(appearance) Then Continue For
-
-                    Dim miiName As String = System.Text.Encoding.Unicode.GetString(nameBytes)
+                    'name = 10 unicode characters at &H20 of the slot
+                    Dim miiName As String = System.Text.Encoding.Unicode.GetString(slotData, &H20, 20)
                     Dim endOfName As Integer = miiName.IndexOf(ChrW(0))
                     If endOfName >= 0 Then miiName = miiName.Substring(0, endOfName)
                     miiName = BulkSafeFileName(miiName)
 
-                    Dim fileName As String = (i + 1).ToString("000") & "_" & miiName & ".MiitopiaMiA"
-                    File.WriteAllBytes(Path.Combine(folderDialog.SelectedPath, fileName), appearance)
+                    Dim fileName As String = i.ToString("000") & "_" & miiName & BULK_EXT
+                    File.WriteAllBytes(Path.Combine(folderDialog.SelectedPath, fileName), slotData)
                     exported += 1
                 Next
             End Using
-            MSE_dialog.text_dialog.Text = exported & " Mii appearances have been successfully exported"
-            MSE_dialog.ShowDialog()
+            BulkShowMessage(exported & " Miis have been successfully exported")
         Catch ex As Exception
-            MSE_dialog.text_dialog.Text = "Failed to export all Mii appearances" & vbNewLine & "Report this issue or retry"
-            MSE_dialog.ShowDialog()
+            BulkShowMessage("Failed to export all Miis" & vbNewLine & ex.Message)
         End Try
     End Sub
 
     Private Sub Button_exportall_MouseMove(sender As Object, e As MouseEventArgs) Handles Button_exportall.MouseMove
-        Text_description.Text = "Click to export ALL Mii appearances in a folder (one file per Mii)"
+        Text_description.Text = "Click to export ALL Miis in a folder (one file per Mii, with name)"
         Panel_description.Visible = True
     End Sub
 
@@ -6262,66 +6288,131 @@ Public Class MSE_transferMii
 
     Private Sub Button_importall_Click(sender As Object, e As EventArgs) Handles Button_importall.Click
         If String.IsNullOrEmpty(CStr(mainsav)) Then
-            MSE_dialog.text_dialog.Text = "Open a Miitopia save file before importing"
-            MSE_dialog.ShowDialog()
+            BulkShowMessage("Open a Miitopia save file before importing")
             Return
         End If
 
-        MSE_dialog.text_dialog.Text = "Choose a folder containing .MiitopiaMiA files named like 001_Name.MiitopiaMiA" & vbNewLine & "The number at the start of the file name is the Mii slot (1-500) that will be REPLACED" & vbNewLine & vbNewLine & "Do you want to continue ?"
-        MSE_dialog.MSE_dialog_panelbuttons.Visible = True
-        MSE_dialog.ShowDialog()
-        If MSE_dialog.DialogResult <> Windows.Forms.DialogResult.OK Then Return
-
         Dim folderDialog As New FolderBrowserDialog
-        folderDialog.Description = "Choose the folder containing the .MiitopiaMiA files to import"
+        folderDialog.Description = "Choose the folder containing the .MiitopiaMii files to import"
         If folderDialog.ShowDialog() <> Windows.Forms.DialogResult.OK Then Return
 
+        Dim answer As Windows.Forms.DialogResult = MessageBox.Show(
+            "YES = add these Miis after the Miis already in the save (recommended, nothing is lost)" & vbNewLine & vbNewLine &
+            "NO = replace the Miis of the save by slot number (001 replaces the first Mii, 002 the second...)" & vbNewLine & vbNewLine &
+            "A copy of main.sav is made before any change.",
+            "Import ALL Miis", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question)
+        If answer = Windows.Forms.DialogResult.Cancel Then Return
+        Dim appendMode As Boolean = (answer = Windows.Forms.DialogResult.Yes)
+
         Try
-            'read and check every file first, so the save is not touched if nothing is valid
-            Dim toWrite As New SortedDictionary(Of Integer, Byte())
+            'read every file first : file number -> full Mii slot
+            Dim miis As New SortedDictionary(Of Integer, Byte())
             Dim skipped As Integer = 0
-            For Each filePath As String In Directory.GetFiles(folderDialog.SelectedPath, "*.MiitopiaMiA")
+            For Each filePath As String In Directory.GetFiles(folderDialog.SelectedPath, "*" & BULK_EXT)
                 Dim m As System.Text.RegularExpressions.Match = System.Text.RegularExpressions.Regex.Match(Path.GetFileName(filePath), "^(\d{1,3})")
-                Dim slot As Integer = 0
-                If Not m.Success OrElse Not Integer.TryParse(m.Groups(1).Value, slot) OrElse slot < 1 OrElse slot > BULK_MII_COUNT Then
+                Dim number As Integer = 0
+                If Not m.Success OrElse Not Integer.TryParse(m.Groups(1).Value, number) OrElse number < 1 OrElse miis.ContainsKey(number) Then
                     skipped += 1
                     Continue For
                 End If
                 Dim data As Byte() = File.ReadAllBytes(filePath)
-                If data.Length <> BULK_APPEARANCE_SIZE Then
+                'a Mii slot is &H800 bytes and starts with "mi"
+                If data.Length <> BULK_SLOT_SIZE OrElse data(0) <> &H6D OrElse data(1) <> &H69 Then
                     skipped += 1
                     Continue For
                 End If
-                toWrite(slot) = data
+                miis(number) = data
             Next
 
-            If toWrite.Count = 0 Then
-                MSE_dialog.text_dialog.Text = "No valid Mii appearance file found in this folder" & vbNewLine & "File names must start with the slot number (ex: 001_Name.MiitopiaMiA)"
-                MSE_dialog.ShowDialog()
+            If miis.Count = 0 Then
+                BulkShowMessage("No valid .MiitopiaMii file found in this folder" & vbNewLine & "Files must come from the Export ALL button (ex: 001_Name.MiitopiaMii)")
                 Return
             End If
 
-            Using fs As New FileStream(CStr(mainsav), FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite)
-                For Each entry As KeyValuePair(Of Integer, Byte()) In toWrite
-                    fs.Position = BULK_APPEARANCE_FIRST + CLng(entry.Key - 1) * BULK_SLOT_SIZE
-                    fs.Write(entry.Value, 0, entry.Value.Length)
-                Next
+            'plan what will be written (slot -> data), reading the save only
+            Dim plan As New SortedDictionary(Of Integer, Byte())
+            Dim newCount As Integer = 0
+            Dim duplicates As Integer = 0
+            Dim tooMany As Integer = 0
+            Using fs As New FileStream(CStr(mainsav), FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
+                If Not BulkIsValidSave(fs) Then
+                    BulkShowMessage("The opened file does not look like a Miitopia main.sav" & vbNewLine & "Nothing has been changed")
+                    Return
+                End If
+                Dim count As Integer = BulkReadInt32(fs, BULK_COUNT_OFFSET)
+                newCount = count
+
+                If appendMode Then
+                    'Mii ids already in the save, so the same Mii is never added twice
+                    Dim existing As New HashSet(Of String)
+                    For i As Integer = 1 To count
+                        existing.Add(BitConverter.ToString(BulkReadBlock(fs, BulkSlotPos(i) + 16, 16)))
+                    Next
+                    For Each entry As KeyValuePair(Of Integer, Byte()) In miis
+                        Dim id As String = BitConverter.ToString(entry.Value, 16, 16)
+                        If existing.Contains(id) Then
+                            duplicates += 1
+                        ElseIf newCount >= BULK_MII_MAX Then
+                            tooMany += 1
+                        Else
+                            newCount += 1
+                            plan(newCount) = entry.Value
+                            existing.Add(id)
+                        End If
+                    Next
+                Else
+                    Dim highest As Integer = 0
+                    For Each entry As KeyValuePair(Of Integer, Byte()) In miis
+                        If entry.Key <= BULK_MII_MAX Then
+                            plan(entry.Key) = entry.Value
+                            If entry.Key > highest Then highest = entry.Key
+                        Else
+                            skipped += 1
+                        End If
+                    Next
+                    'no hole allowed after the last Mii of the save, the game would show empty Miis
+                    For k As Integer = count + 1 To highest
+                        If Not plan.ContainsKey(k) Then
+                            BulkShowMessage("Mii number " & k & " is missing in the folder" & vbNewLine & "The save has " & count & " Miis, so the files must continue without a hole" & vbNewLine & "Nothing has been changed")
+                            Return
+                        End If
+                    Next
+                    If highest > newCount Then newCount = highest
+                End If
             End Using
 
-            Dim message As String = toWrite.Count & " Mii appearances have been successfully imported"
-            If skipped > 0 Then message &= vbNewLine & skipped & " file(s) were ignored (bad name or bad size)"
-            MSE_dialog.text_dialog.Text = message & vbNewLine & "You will be back to menu"
-            MSE_dialog.ShowDialog()
+            If plan.Count = 0 Then
+                BulkShowMessage("Nothing to import : all these Miis are already in the save" & vbNewLine & "Nothing has been changed")
+                Return
+            End If
+
+            'safety copy of the save, then write
+            File.Copy(CStr(mainsav), CStr(mainsav) & ".before_import_" & DateTime.Now.ToString("yyyyMMdd_HHmmss"))
+            Using fs As New FileStream(CStr(mainsav), FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite)
+                For Each entry As KeyValuePair(Of Integer, Byte()) In plan
+                    fs.Position = BulkSlotPos(entry.Key)
+                    fs.Write(entry.Value, 0, BULK_SLOT_SIZE)
+                Next
+                BulkWriteInt32(fs, BULK_COUNT_OFFSET, newCount)
+                If BulkReadInt32(fs, BULK_NEXTID_OFFSET) < newCount + 1 Then
+                    BulkWriteInt32(fs, BULK_NEXTID_OFFSET, newCount + 1)
+                End If
+            End Using
+
+            Dim message As String = plan.Count & " Miis have been successfully imported (the save now has " & newCount & " Miis)"
+            If duplicates > 0 Then message &= vbNewLine & duplicates & " already in the save (ignored)"
+            If tooMany > 0 Then message &= vbNewLine & tooMany & " not imported : the save is full (500 Miis max)"
+            If skipped > 0 Then message &= vbNewLine & skipped & " file(s) ignored (bad name or bad size)"
+            BulkShowMessage(message & vbNewLine & "You will be back to menu")
             MSE_hub.Show()
             Me.Close()
         Catch ex As Exception
-            MSE_dialog.text_dialog.Text = "Failed to import all Mii appearances" & vbNewLine & "Make sure you have opened a Miitopia save file before or report this issue"
-            MSE_dialog.ShowDialog()
+            BulkShowMessage("Failed to import all Miis" & vbNewLine & ex.Message)
         End Try
     End Sub
 
     Private Sub Button_importall_MouseMove(sender As Object, e As MouseEventArgs) Handles Button_importall.MouseMove
-        Text_description.Text = "Click to import ALL Mii appearances from a folder (slot = number at start of file name)"
+        Text_description.Text = "Click to import ALL Miis from a folder (with their names)"
         Panel_description.Visible = True
     End Sub
 
